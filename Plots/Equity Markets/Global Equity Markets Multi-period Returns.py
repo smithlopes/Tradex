@@ -62,7 +62,7 @@ HORIZON_YEARS = {
 
 # Horizons of this many years or more are shown annualised (p.a.).
 # Set to None to show cumulative returns for every horizon.
-ANNUALISE_FROM_YEARS = 3
+ANNUALISE_FROM_YEARS = None
 
 # Column used to sort the rows
 SORT_BY = "1Y"
@@ -820,11 +820,9 @@ annot_df = pd.DataFrame(
 
 for column in horizon_cols:
 
-    decimals = 2 if column == "1D" else 1
-
     annot_df[column] = heatmap_df[column].map(
-        lambda value, d=decimals: (
-            f"{value:+.{d}f}%"
+        lambda value: (
+            f"{value:+.1f}%"
             if pd.notna(value)
             else ""
         )
