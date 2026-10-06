@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
 import time
 from pathlib import Path
 
@@ -8,7 +10,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.font_manager import FontProperties
 from matplotlib.patches import Rectangle
 from matplotlib import font_manager
 
@@ -32,17 +34,16 @@ except ImportError as error:
 
 # Manual chart positioning controls
 TITLE_Y = 0.955
-SUBTITLE_Y = 0.915
+SUBTITLE_Y = 0.91
 SUBTITLE_LINE_SPACING = 0.020
-HEAT_MAP_Y = 0.12
-SOURCE_Y = 0.082
-NOTE_Y = 0.060
+HEAT_MAP_Y = 0.11
+SOURCE_Y = 0.079
+NOTE_Y = 0.057
 NOTE_LINE_SPACING = 0.016
 
 # Horizons shown in the heatmap (label -> look-back offset).
-# 1D is handled separately: last observation vs the one before it.
-HORIZONS = {
-    "1D": None,
+PERIODS = {
+    "1D": pd.DateOffset(days=1),
     "1W": pd.DateOffset(weeks=1),
     "1M": pd.DateOffset(months=1),
     "3M": pd.DateOffset(months=3),
@@ -53,12 +54,7 @@ HORIZONS = {
     "10Y": pd.DateOffset(years=10),
 }
 
-# Number of years behind each multi-year horizon (used to annualise)
-HORIZON_YEARS = {
-    "3Y": 3,
-    "5Y": 5,
-    "10Y": 10,
-}
+PERIOD_COLUMNS = list(PERIODS.keys())
 
 # Horizons of this many years or more are shown annualised (p.a.).
 # Set to None to show cumulative returns for every horizon.
@@ -141,7 +137,7 @@ BENCHMARKS = {
     "MSCI World": "990100",
     "MSCI Emerging Markets": "891800",
     "MSCI All Country": "892400",
-    "MSCI Ex-AMER": "991000",
+    "MSCI Ex-AMER": "990300",
     "MSCI World Momentum": "703755",
 }
 
@@ -170,47 +166,6 @@ def clean_index_code(
     return str(index_code).strip()
 
 
-def is_placeholder_code(
-    index_code: object,
-) -> bool:
-    """Return True when an MSCI index code is a placeholder."""
-
-    cleaned_code = clean_index_code(
-        index_code
-    )
-
-    if not cleaned_code:
-        return True
-
-    upper_code = cleaned_code.upper()
-
-    exact_placeholders = {
-        "NONE",
-        "N/A",
-        "NA",
-        "TBC",
-        "TBD",
-        "PLACEHOLDER",
-    }
-
-    placeholder_prefixes = (
-        "REPLACE",
-        "REPLACE WITH",
-        "REPLACE-WITH",
-        "ADD",
-        "INSERT",
-        "ENTER",
-        "PUT",
-    )
-
-    if upper_code in exact_placeholders:
-        return True
-
-    return upper_code.startswith(
-        placeholder_prefixes
-    )
-
-
 def validate_numeric_index_code(
     index_name: str,
     index_code: object,
@@ -221,9 +176,14 @@ def validate_numeric_index_code(
         index_code
     )
 
+    if not cleaned_code:
+        raise ValueError(
+            f"No MSCI index code was supplied for {index_name}."
+        )
+
     if not cleaned_code.isdecimal():
         raise ValueError(
-            f"MSCI index code for '{index_name}' must contain "
+            f"MSCI index code for {index_name} must contain "
             f"digits only. Received: {cleaned_code!r}"
         )
 
@@ -236,33 +196,10 @@ def validate_numeric_index_code(
 
 today = pd.Timestamp.today().normalize()
 
-longest_offset = max(
-    (
-        offset
-        for offset in HORIZONS.values()
-        if offset is not None
-    ),
-    key=lambda offset: today - offset,
-    default=pd.DateOffset(years=1),
-)
-
-# max() above picks the offset giving the *latest* date, so pick the
-# offset giving the earliest date instead.
-longest_offset = min(
-    (
-        offset
-        for offset in HORIZONS.values()
-        if offset is not None
-    ),
-    key=lambda offset: today - offset,
-)
-
 download_start_date = (
     today
-    - longest_offset
-    - pd.Timedelta(
-        days=DOWNLOAD_LOOKBACK_DAYS
-    )
+    - pd.DateOffset(years=10)
+    - pd.Timedelta(days=14)
 )
 
 download_end_date = today
@@ -278,15 +215,6 @@ chart_title = (
 valid_indices: dict[str, str] = {}
 
 for index_name, index_code in ALL_INDICES.items():
-
-    if is_placeholder_code(index_code):
-
-        print(
-            f"Skipping {index_name}: a confirmed numeric "
-            f"MSCI index code has not been supplied."
-        )
-
-        continue
 
     cleaned_index_code = validate_numeric_index_code(
         index_name=index_name,
@@ -353,13 +281,13 @@ try:
         download_end_date.strftime(
             "%Y-%m-%d"
         ),
-        variant=MSCI_RETURN_VARIANT,
+        MSCI_RETURN_VARIANT,
     )
 
 except Exception as error:
 
     raise RuntimeError(
-        f"The batched MSCI data request failed.\n"
+        f"The batched MSCI data request failed. "
         f"Original error: {error}"
     ) from error
 
@@ -512,6 +440,12 @@ if hist.empty:
         "index codes."
     )
 
+if "CURRENCY" not in hist.columns:
+    hist["CURRENCY"] = "USD"
+
+hist["REQUESTED_INDEX_CODE"] = hist["INDEX_CODE"]
+hist["REQUESTED_VARIANT"] = MSCI_RETURN_VARIANT
+
 hist = (
     hist.sort_values(
         [
@@ -530,6 +464,8 @@ hist = (
 )
 
 hist["price"] = hist["LEVEL"]
+
+hist["price_source"] = "MSCI Net Total Return Index Level"
 
 returned_codes = set(
     hist["INDEX_CODE"]
@@ -551,6 +487,21 @@ for missing_code in unique_index_codes:
             )
         )
 
+
+def get_price_on_or_before(
+    price_data: pd.DataFrame,
+    target_date: pd.Timestamp,
+) -> pd.Series | None:
+    eligible_data = price_data.loc[
+        price_data["date"] <= target_date
+    ]
+
+    if eligible_data.empty:
+        return None
+
+    return eligible_data.iloc[-1]
+
+
 # =====================================================================
 # CALCULATE MULTI-PERIOD RETURNS
 # =====================================================================
@@ -562,37 +513,29 @@ print(
     f"Latest observation date: {as_of_date:%Y-%m-%d}"
 )
 
-horizon_cols = list(
-    HORIZONS.keys()
-)
-
 rows: list[dict[str, object]] = []
 
 for index_name, index_code in valid_indices.items():
 
     try:
 
-        levels = (
+        temp = (
             hist.loc[
                 hist["INDEX_CODE"] == index_code,
                 [
                     "DATE",
                     "price",
+                    "price_source",
+                    "CURRENCY",
                 ],
             ]
-            .drop_duplicates(
-                subset=[
-                    "DATE",
-                ],
-                keep="last",
-            )
-            .set_index(
-                "DATE"
-            )["price"]
-            .sort_index()
+            .rename(columns={"DATE": "date"})
+            .dropna(subset=["date", "price"])
+            .drop_duplicates(subset=["date"], keep="last")
+            .sort_values("date")
         )
 
-        if levels.empty:
+        if temp.empty:
 
             print(
                 f"No MSCI history returned for "
@@ -601,113 +544,50 @@ for index_name, index_code in valid_indices.items():
 
             continue
 
-        end_level = float(
-            levels.asof(
-                as_of_date
-            )
+        end_observation = temp.iloc[-1]
+
+        end_date = pd.Timestamp(
+            end_observation["date"]
+        )
+
+        end_price = float(
+            end_observation["price"]
         )
 
         row: dict[str, object] = {
-            "Sector": index_name,
+            "Market": index_name,
         }
 
-        for label, offset in HORIZONS.items():
+        for period_label, offset in PERIODS.items():
 
-            if label == "1D":
+            target_start_date = end_date - offset
 
-                # Latest observation vs the previous trading day
-                if len(levels) >= 2:
+            start_observation = get_price_on_or_before(
+                temp,
+                target_start_date,
+            )
 
-                    period_return = (
-                        float(levels.iloc[-1])
-                        / float(levels.iloc[-2])
-                        - 1
-                    )
+            if start_observation is None:
 
-                else:
+                row[period_label] = np.nan
 
-                    period_return = np.nan
+                continue
+
+            start_price = float(
+                start_observation["price"]
+            )
+
+            if start_price == 0:
+
+                period_return = np.nan
 
             else:
 
-                target_date = as_of_date - offset
-
-                # No history that far back for this index
-                if target_date < levels.index[0]:
-
-                    period_return = np.nan
-
-                else:
-
-                    start_level = levels.asof(
-                        target_date
-                    )
-
-                    if pd.isna(start_level) or start_level == 0:
-
-                        period_return = np.nan
-
-                    else:
-
-                        period_return = (
-                            end_level
-                            / float(start_level)
-                            - 1
-                        )
-
-            # Annualise the multi-year horizons
-            years = HORIZON_YEARS.get(
-                label
-            )
-
-            if (
-                ANNUALISE_FROM_YEARS is not None
-                and years is not None
-                and years >= ANNUALISE_FROM_YEARS
-                and pd.notna(period_return)
-            ):
-
                 period_return = (
-                    (1 + period_return)
-                    ** (1 / years)
-                    - 1
-                )
+                    (end_price / start_price) - 1
+                ) * 100
 
-            row[label] = (
-                period_return * 100
-                if pd.notna(period_return)
-                else np.nan
-            )
-
-        # Annualised SD of daily returns over the trailing window
-        sd_window = levels.loc[
-            as_of_date - SD_LOOKBACK:
-            as_of_date
-        ]
-
-        sd_daily_returns = (
-            sd_window
-            .pct_change(
-                fill_method=None
-            )
-            .dropna()
-        )
-
-        if len(sd_daily_returns) >= MIN_SD_OBSERVATIONS:
-
-            row["Annualized SD"] = (
-                float(
-                    sd_daily_returns.std(
-                        ddof=1
-                    )
-                )
-                * np.sqrt(252)
-                * 100
-            )
-
-        else:
-
-            row["Annualized SD"] = np.nan
+            row[period_label] = period_return
 
         rows.append(
             row
@@ -733,18 +613,15 @@ if combined_df.empty:
     )
 
 combined_df = combined_df.set_index(
-    "Sector"
+    "Market"
 )
 
-combined_df = combined_df[
-    horizon_cols
-    + [
-        "Annualized SD",
-    ]
-]
+combined_df = combined_df.reindex(
+    columns=PERIOD_COLUMNS
+)
 
 combined_df = combined_df.sort_values(
-    SORT_BY,
+    "1Y",
     ascending=False,
     na_position="last",
 )
@@ -754,49 +631,49 @@ combined_df = combined_df.sort_values(
 # =====================================================================
 
 subtitle = (
-    "Equity-market returns across major economies over horizons "
-    "from one day to ten years, with trailing one-year volatility"
+    "Cross-market performance across short-, medium- and long-term horizons"
 )
 
-sort_series = (
-    combined_df[SORT_BY]
-    .replace([np.inf, -np.inf], np.nan)
+insight_df = combined_df.replace(
+    [np.inf, -np.inf],
+    np.nan,
+)
+
+one_year_ranking = (
+    insight_df["1Y"]
     .dropna()
     .sort_values(ascending=False)
 )
 
-month_series = (
-    combined_df["1M"]
-    .replace([np.inf, -np.inf], np.nan)
+ten_year_ranking = (
+    insight_df["10Y"]
     .dropna()
     .sort_values(ascending=False)
 )
 
-vol_series = (
-    combined_df["Annualized SD"]
-    .replace([np.inf, -np.inf], np.nan)
+one_month_ranking = (
+    insight_df["1M"]
     .dropna()
     .sort_values(ascending=False)
 )
 
 if (
-    len(sort_series) >= 2
-    and len(month_series) >= 2
-    and len(vol_series) >= 2
+    len(one_year_ranking) >= 2
+    and len(ten_year_ranking) >= 2
+    and len(one_month_ranking) >= 2
 ):
 
     subtitle = (
-        f"Over {SORT_BY}, {sort_series.index[0]} led at "
-        f"{sort_series.iloc[0]:+.1f}% while "
-        f"{sort_series.index[-1]} lagged at "
-        f"{sort_series.iloc[-1]:+.1f}%. Over the past month, "
-        f"{month_series.index[0]} led at "
-        f"{month_series.iloc[0]:+.1f}% and "
-        f"{month_series.index[-1]} trailed at "
-        f"{month_series.iloc[-1]:+.1f}%. "
-        f"{vol_series.index[-1]} was the least volatile at "
-        f"{vol_series.iloc[-1]:.1f}%, compared with "
-        f"{vol_series.index[0]} at {vol_series.iloc[0]:.1f}%."
+        f"{str(one_year_ranking.index[0])} led one-year returns at "
+        f"{float(one_year_ranking.iloc[0]):+.1f}%, while "
+        f"{str(one_year_ranking.index[-1])} lagged at "
+        f"{float(one_year_ranking.iloc[-1]):+.1f}%. "
+        f"{str(ten_year_ranking.index[0])} delivered the strongest "
+        f"ten-year return at "
+        f"{float(ten_year_ranking.iloc[0]):+.1f}%, and "
+        f"{str(one_month_ranking.index[0])} led the latest one-month "
+        f"performance at "
+        f"{float(one_month_ranking.iloc[0]):+.1f}%"
     )
 
 # =====================================================================
@@ -804,54 +681,16 @@ if (
 # =====================================================================
 
 heatmap_df = combined_df[
-    horizon_cols
+    PERIOD_COLUMNS
 ].copy()
 
-annualized_sd_series = (
-    combined_df["Annualized SD"]
-    .copy()
-)
-
-annot_df = pd.DataFrame(
-    "",
-    index=heatmap_df.index,
-    columns=heatmap_df.columns,
-)
-
-for column in horizon_cols:
-
-    annot_df[column] = heatmap_df[column].map(
-        lambda value: (
-            f"{value:+.1f}%"
-            if pd.notna(value)
-            else ""
-        )
+annot_df = heatmap_df.map(
+    lambda value: (
+        f"{value:+.1f}%"
+        if pd.notna(value)
+        else ""
     )
-
-# Header labels (flag the annualised columns)
-display_labels: list[str] = []
-
-for column in horizon_cols:
-
-    years = HORIZON_YEARS.get(
-        column
-    )
-
-    if (
-        ANNUALISE_FROM_YEARS is not None
-        and years is not None
-        and years >= ANNUALISE_FROM_YEARS
-    ):
-
-        display_labels.append(
-            f"{column} p.a."
-        )
-
-    else:
-
-        display_labels.append(
-            column
-        )
+)
 
 # =====================================================================
 # PLOT
@@ -861,12 +700,8 @@ number_of_rows = len(
     heatmap_df
 )
 
-sd_column_index = len(
-    horizon_cols
-)
-
-total_number_of_columns = (
-    sd_column_index + 1
+total_number_of_columns = len(
+    PERIOD_COLUMNS
 )
 
 figure_width = 23
@@ -897,7 +732,7 @@ common_right_position = 0.97
 maximum_label_width_pixels = 0.0
 
 for label in [
-    "Economies",
+    "Markets",
     *heatmap_df.index,
 ]:
 
@@ -968,7 +803,7 @@ ax = fig.add_axes(
 # Heatmap: one independent colour scale per horizon column
 # ---------------------------------------------------------------------
 
-for column in horizon_cols:
+for column in PERIOD_COLUMNS:
 
     column_df = pd.DataFrame(
         np.nan,
@@ -986,38 +821,21 @@ for column in horizon_cols:
 
     column_annot[column] = annot_df[column]
 
-    if column_df[column].notna().sum() == 0:
-        continue
-
-    column_limit = float(
-        column_df[column]
-        .abs()
-        .max()
-    )
-
-    if not np.isfinite(column_limit) or column_limit <= 0:
-
-        column_limit = 1.0
-
     sns.heatmap(
         column_df,
         ax=ax,
         cmap="RdYlGn",
-        vmin=-column_limit,
-        vmax=column_limit,
         center=0,
         annot=column_annot.values,
         fmt="",
         annot_kws={
-            "fontsize": 15,
-            "fontweight": "bold",
+            "size": 14,
+            "weight": "bold",
         },
         mask=column_df.isna(),
         cbar=False,
         linewidths=1,
         linecolor="white",
-        xticklabels=False,
-        yticklabels=False,
     )
 
 ax.set_xlabel("")
@@ -1026,122 +844,6 @@ ax.set_ylabel("")
 
 ax.set_xticks([])
 
-for spine in ax.spines.values():
-    spine.set_visible(False)
-
-# =====================================================================
-# ANNUALIZED SD DATA BARS (LEFT TO RIGHT GRADIENT)
-# =====================================================================
-
-finite_sd_values = (
-    annualized_sd_series
-    .replace(
-        [
-            np.inf,
-            -np.inf,
-        ],
-        np.nan,
-    )
-    .dropna()
-)
-
-if finite_sd_values.empty:
-
-    maximum_sd = 1.0
-
-else:
-
-    maximum_sd = float(
-        finite_sd_values.max()
-    )
-
-if maximum_sd <= 0:
-
-    maximum_sd = 1.0
-
-sd_gradient_cmap = (
-    LinearSegmentedColormap.from_list(
-        "AnnualizedSDGradient",
-        [
-            "#F2F2F2",
-            "#FFE8E8",
-            "#FFCACA",
-            "#FF9D9D",
-            "#FF7070",
-            "#FF4D4D",
-        ],
-    )
-)
-
-sd_gradient_array = np.linspace(
-    0,
-    1,
-    256,
-).reshape(
-    1,
-    -1,
-)
-
-for row_position, sd_value in enumerate(
-    annualized_sd_series
-):
-
-    cell_x = sd_column_index
-
-    cell_y = row_position
-
-    ax.add_patch(
-        Rectangle(
-            (
-                cell_x,
-                cell_y,
-            ),
-            1,
-            1,
-            facecolor="white",
-            edgecolor="none",
-            linewidth=0,
-            zorder=5,
-        )
-    )
-
-    if pd.notna(sd_value) and np.isfinite(sd_value):
-
-        bar_fraction = float(
-            np.clip(
-                sd_value / maximum_sd,
-                0.03,
-                1.0,
-            )
-        )
-
-        ax.imshow(
-            sd_gradient_array,
-            cmap=sd_gradient_cmap,
-            extent=[
-                cell_x,
-                cell_x + bar_fraction,
-                cell_y + 1,
-                cell_y,
-            ],
-            aspect="auto",
-            interpolation="bilinear",
-            zorder=6,
-        )
-
-        ax.text(
-            cell_x + 0.5,
-            cell_y + 0.5,
-            f"{sd_value:.1f}%",
-            ha="center",
-            va="center",
-            fontsize=15,
-            fontweight="bold",
-            color="black",
-            zorder=11,
-        )
-
-# imshow resets the axis limits, so apply the table limits afterwards
 ax.set_xlim(
     -y_axis_label_column_width,
     total_number_of_columns,
@@ -1156,12 +858,7 @@ ax.set_ylim(
 # X-AXIS LABEL CELLS
 # =====================================================================
 
-x_axis_labels = (
-    display_labels
-    + [
-        SD_LABEL,
-    ]
-)
+x_axis_labels = PERIOD_COLUMNS
 
 for column_position, column_label in enumerate(
     x_axis_labels
@@ -1178,7 +875,7 @@ for column_position, column_label in enumerate(
             facecolor="#F2F2F2",
             edgecolor="none",
             linewidth=0,
-            zorder=9,
+            zorder=10,
             clip_on=False,
         )
     )
@@ -1290,7 +987,7 @@ ax.text(
     -y_axis_label_column_width
     + label_text_offset,
     -0.5,
-    "Economies",
+    "Markets",
     ha="left",
     va="center",
     fontsize=16,
@@ -1304,22 +1001,6 @@ ax.text(
 # BORDERS AND ROW GUIDES
 # =====================================================================
 
-# Bottom border of the header row
-ax.plot(
-    [
-        -y_axis_label_column_width,
-        total_number_of_columns,
-    ],
-    [
-        0,
-        0,
-    ],
-    color="#1b263b",
-    linewidth=2.5,
-    zorder=24,
-    clip_on=False,
-)
-
 # Vertical border between the label column and the data columns
 ax.plot(
     [
@@ -1332,23 +1013,7 @@ ax.plot(
     ],
     color="#1b263b",
     linewidth=2.5,
-    zorder=14,
-    clip_on=False,
-)
-
-# Vertical border before the SD column
-ax.plot(
-    [
-        sd_column_index,
-        sd_column_index,
-    ],
-    [
-        -1,
-        number_of_rows,
-    ],
-    color="#1b263b",
-    linewidth=2.5,
-    zorder=16,
+    zorder=26,
     clip_on=False,
 )
 
@@ -1377,7 +1042,7 @@ for row_boundary in range(
             ),
         ),
         alpha=1,
-        zorder=23,
+        zorder=20,
         clip_on=False,
     )
 
@@ -1409,7 +1074,7 @@ fig.text(
     chart_title,
     ha="left",
     va="top",
-    fontsize=36,
+    fontsize=38,
     fontweight="bold",
 )
 
@@ -1480,9 +1145,9 @@ def wrap_text_to_figure_width(
 
 subtitle_right_limit = 0.97
 
-subtitle_font_size = 18.0
+subtitle_font_size = 20.0
 
-subtitle_color = "#696969"
+subtitle_color = "#666666"
 
 subtitle_lines = wrap_text_to_figure_width(
     subtitle,
@@ -1538,27 +1203,11 @@ fig.text(
 # =====================================================================
 
 data_note = (
-    "Notes: Returns are MSCI Net Total Return indices in USD, "
-    f"measured to {as_of_date:%d %b %Y}. "
-)
-
-if ANNUALISE_FROM_YEARS is not None:
-
-    data_note += (
-        f"Horizons of {ANNUALISE_FROM_YEARS} years or more are "
-        "annualised (p.a.); shorter horizons are cumulative. "
-    )
-
-else:
-
-    data_note += (
-        "All horizons are cumulative returns. "
-    )
-
-data_note += (
-    f"{SD_LABEL} is the standard deviation of daily returns over "
-    "the last year, annualized using the 252 trading day "
-    "convention. Blank cells indicate insufficient index history."
+    "Notes: Returns are cumulative holding-period returns calculated "
+    "from MSCI Net Total Return index levels in USD and are not "
+    "annualized. NETR incorporates reinvested dividends after "
+    "applicable withholding-tax assumptions; observation dates may "
+    "vary by market."
 )
 
 data_note_font_size = 16

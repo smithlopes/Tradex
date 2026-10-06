@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
 import time
 from pathlib import Path
 
@@ -11,6 +13,7 @@ import seaborn as sns
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Rectangle
 from matplotlib import font_manager
+from matplotlib.font_manager import FontProperties
 
 # =====================================================================
 # IMPORT MSCI-DATA
@@ -35,7 +38,7 @@ TITLE_Y = 0.955
 SUBTITLE_Y = 0.915
 SUBTITLE_LINE_SPACING = 0.020
 HEAT_MAP_Y = 0.12
-SOURCE_Y = 0.082
+SOURCE_Y = 0.081
 NOTE_Y = 0.060
 NOTE_LINE_SPACING = 0.016
 
@@ -120,7 +123,7 @@ BENCHMARKS = {
     "MSCI World": "990100",
     "MSCI Emerging Markets": "891800",
     "MSCI All Country": "892400",
-    "MSCI Ex-AMER": "991000",
+    "MSCI Ex-AMER": "990300",
     "MSCI World Momentum": "703755",
 }
 
@@ -202,7 +205,7 @@ def validate_numeric_index_code(
 
     if not cleaned_code.isdecimal():
         raise ValueError(
-            f"MSCI index code for '{index_name}' must contain "
+            f"MSCI index code for {index_name} must contain "
             f"digits only. Received: {cleaned_code!r}"
         )
 
@@ -363,13 +366,13 @@ try:
         download_end_date.strftime(
             "%Y-%m-%d"
         ),
-        variant=MSCI_RETURN_VARIANT,
+        MSCI_RETURN_VARIANT,
     )
 
 except Exception as error:
 
     raise RuntimeError(
-        f"The batched MSCI data request failed.\n"
+        f"The batched MSCI data request failed. "
         f"Original error: {error}"
     ) from error
 
@@ -673,6 +676,15 @@ for sector_name, index_code in ALL_INDICES.items():
             )
         )
 
+        monthly_price_sources = (
+            indexed_temp["price_source"]
+            .resample("ME")
+            .last()
+            .reindex(
+                monthly_prices.index
+            )
+        )
+
         monthly_periods = (
             monthly_prices.index.to_period("M")
         )
@@ -690,6 +702,12 @@ for sector_name, index_code in ALL_INDICES.items():
 
         monthly_observation_dates = (
             monthly_observation_dates.reindex(
+                monthly_prices.index
+            )
+        )
+
+        monthly_price_sources = (
+            monthly_price_sources.reindex(
                 monthly_prices.index
             )
         )
@@ -724,20 +742,40 @@ for sector_name, index_code in ALL_INDICES.items():
             "Sector": sector_name,
         }
 
-        for month_end, monthly_return in (
-            monthly_returns.loc[
-                reporting_return_mask
-            ].items()
+        returned_currency = "USD"
+
+        if (
+            "CURRENCY" in temp.columns
+            and not temp["CURRENCY"].dropna().empty
         ):
 
-            row[
-                month_end.strftime(
-                    "%b-%y"
-                )
-            ] = monthly_return
+            returned_currency = str(
+                temp["CURRENCY"].dropna().iloc[0]
+            )
+
+        for position, (dt, ret) in enumerate(
+            monthly_returns.items()
+        ):
+
+            if not bool(reporting_return_mask[position]):
+                continue
+
+            if pd.isna(ret):
+                continue
+
+            if position == 0:
+                continue
+
+            month_label = dt.strftime("%b %y")
+
+            row[month_label] = float(ret)
 
         reporting_prices_mask = (
             (
+                monthly_prices.index.to_period("M")
+                >= previous_month
+            )
+            & (
                 monthly_prices.index.to_period("M")
                 >= previous_month
             )
@@ -755,6 +793,12 @@ for sector_name, index_code in ALL_INDICES.items():
 
         reporting_observation_dates = (
             monthly_observation_dates.reindex(
+                reporting_prices.index
+            )
+        )
+
+        reporting_price_sources = (
+            monthly_price_sources.reindex(
                 reporting_prices.index
             )
         )
@@ -789,6 +833,22 @@ for sector_name, index_code in ALL_INDICES.items():
 
         total_end_observation_date = (
             reporting_observation_dates.iloc[-1]
+        )
+
+        total_start_price = float(
+            reporting_prices.iloc[0]
+        )
+
+        total_end_price = float(
+            reporting_prices.iloc[-1]
+        )
+
+        total_start_price_source = (
+            reporting_price_sources.iloc[0]
+        )
+
+        total_end_price_source = (
+            reporting_price_sources.iloc[-1]
         )
 
         volatility_prices = (
@@ -848,6 +908,8 @@ for sector_name, index_code in ALL_INDICES.items():
             )
 
         else:
+
+            daily_sd = np.nan
 
             annualized_sd = np.nan
 
@@ -1001,7 +1063,9 @@ if not insight_df.empty:
         volatility_ranking.iloc[-1]
     )
 
-    efficiency_df = insight_df.copy()
+    efficiency_df = insight_df.loc[
+        insight_df["Annualized SD"] > 0
+    ].copy()
 
     efficiency_df[
         "Return-to-Volatility Ratio"
@@ -1057,7 +1121,7 @@ if not insight_df.empty:
                 f"{least_volatile_name} recorded the lowest "
                 f"volatility at {least_volatile_value:.1f}%, "
                 f"compared with {most_volatile_name} at "
-                f"{most_volatile_value:.1f}%."
+                f"{most_volatile_value:.1f}%"
             )
 
         else:
@@ -1073,7 +1137,7 @@ if not insight_df.empty:
                 f"{least_volatile_name} recorded the lowest "
                 f"volatility at {least_volatile_value:.1f}%, "
                 f"compared with {most_volatile_name} at "
-                f"{most_volatile_value:.1f}%."
+                f"{most_volatile_value:.1f}%"
             )
 
 # =====================================================================
@@ -1176,73 +1240,6 @@ common_left_position = 0.03
 
 common_right_position = 0.97
 
-# ---------------------------------------------------------------------
-# Measure the widest y-axis label so the first column fits its content
-# (with padding on both sides)
-# ---------------------------------------------------------------------
-
-maximum_label_width_pixels = 0.0
-
-for label in [
-    "Economies",
-    *heatmap_df.index,
-]:
-
-    probe = fig.text(
-        0,
-        0,
-        label,
-        fontsize=16,
-        fontweight="bold",
-    )
-
-    maximum_label_width_pixels = max(
-        maximum_label_width_pixels,
-        probe.get_window_extent(
-            renderer=renderer
-        ).width,
-    )
-
-    probe.remove()
-
-label_padding_left_pixels = 0.12 * fig.dpi
-
-label_padding_right_pixels = 0.20 * fig.dpi
-
-label_column_pixels = (
-    maximum_label_width_pixels
-    + label_padding_left_pixels
-    + label_padding_right_pixels
-)
-
-table_width_pixels = (
-    (
-        common_right_position
-        - common_left_position
-    )
-    * fig.bbox.width
-)
-
-# The axes span the WHOLE table (label column + data columns), so the
-# left border of the table lines up with the title and subtitle.
-pixels_per_heatmap_column = (
-    (
-        table_width_pixels
-        - label_column_pixels
-    )
-    / total_number_of_columns
-)
-
-y_axis_label_column_width = (
-    label_column_pixels
-    / pixels_per_heatmap_column
-)
-
-label_text_offset = (
-    label_padding_left_pixels
-    / pixels_per_heatmap_column
-)
-
 ax = fig.add_axes(
     [
         common_left_position,
@@ -1253,35 +1250,67 @@ ax = fig.add_axes(
     ]
 )
 
+fig.canvas.draw()
+
+y_axis_label_font = FontProperties(
+    family=FONT_FAMILY,
+    size=16,
+    weight="bold",
+)
+
+maximum_label_width_pixels = max(
+    renderer.get_text_width_height_descent(
+        str(row_label),
+        y_axis_label_font,
+        ismath=False,
+    )[0]
+    for row_label in heatmap_df.index
+)
+
+heatmap_axis_width_pixels = (
+    ax.get_window_extent(
+        renderer=renderer
+    ).width
+)
+
+pixels_per_heatmap_column = (
+    heatmap_axis_width_pixels
+    / total_number_of_columns
+)
+
+y_axis_label_horizontal_padding = 0.6
+
+y_axis_label_column_width = (
+    maximum_label_width_pixels
+    / pixels_per_heatmap_column
+    + y_axis_label_horizontal_padding
+)
+
 # ---------------------------------------------------------------------
 # Heatmaps (independent scales)
 # ---------------------------------------------------------------------
 
 sns.heatmap(
     monthly_heatmap_df,
-    ax=ax,
     cmap="RdYlGn",
     center=0,
-    annot=monthly_annot_df.values,
+    annot=monthly_annot_df,
     fmt="",
     annot_kws={
-        "fontsize": 15,
+        "fontsize": 14,
         "fontweight": "bold",
     },
     mask=monthly_heatmap_df.isna(),
     cbar=False,
     linewidths=1,
     linecolor="white",
-    xticklabels=False,
-    yticklabels=False,
 )
 
 sns.heatmap(
     total_heatmap_df,
-    ax=ax,
     cmap="RdYlGn",
     center=0,
-    annot=total_annot_df.values,
+    annot=total_annot_df,
     fmt="",
     annot_kws={
         "fontsize": 15,
@@ -1289,10 +1318,8 @@ sns.heatmap(
     },
     mask=total_heatmap_df.isna(),
     cbar=False,
-    linewidths=0.5,
+    linewidths=1,
     linecolor="white",
-    xticklabels=False,
-    yticklabels=False,
 )
 
 ax.set_xlabel("")
@@ -1300,9 +1327,6 @@ ax.set_xlabel("")
 ax.set_ylabel("")
 
 ax.set_xticks([])
-
-for spine in ax.spines.values():
-    spine.set_visible(False)
 
 # =====================================================================
 # ANNUALIZED SD DATA BARS (LEFT TO RIGHT GRADIENT)
@@ -1348,15 +1372,6 @@ sd_gradient_cmap = (
     )
 )
 
-sd_gradient_array = np.linspace(
-    0,
-    1,
-    256,
-).reshape(
-    1,
-    -1,
-)
-
 for row_position, sd_value in enumerate(
     annualized_sd_series
 ):
@@ -1377,33 +1392,47 @@ for row_position, sd_value in enumerate(
             facecolor="white",
             edgecolor="none",
             linewidth=0,
-            zorder=5,
+            zorder=2,
         )
     )
 
     if pd.notna(sd_value) and np.isfinite(sd_value):
 
-        bar_fraction = float(
+        normalized_sd = float(
             np.clip(
                 sd_value / maximum_sd,
-                0.03,
-                1.0,
+                0,
+                1,
             )
         )
 
-        ax.imshow(
-            sd_gradient_array,
-            cmap=sd_gradient_cmap,
-            extent=[
-                cell_x,
-                cell_x + bar_fraction,
-                cell_y + 1,
-                cell_y,
-            ],
-            aspect="auto",
-            interpolation="bilinear",
-            zorder=6,
-        )
+        if normalized_sd > 0:
+
+            gradient = np.linspace(
+                0,
+                normalized_sd,
+                512,
+            ).reshape(
+                1,
+                -1,
+            )
+
+            ax.imshow(
+                gradient,
+                aspect="auto",
+                cmap=sd_gradient_cmap,
+                interpolation="bicubic",
+                extent=[
+                    cell_x,
+                    cell_x + normalized_sd,
+                    cell_y + 1,
+                    cell_y,
+                ],
+                vmin=0,
+                vmax=1,
+                origin="upper",
+                zorder=3,
+            )
 
         ax.text(
             cell_x + 0.5,
@@ -1414,8 +1443,23 @@ for row_position, sd_value in enumerate(
             fontsize=15,
             fontweight="bold",
             color="black",
-            zorder=11,
+            zorder=5,
         )
+
+    ax.add_patch(
+        Rectangle(
+            (
+                cell_x,
+                cell_y,
+            ),
+            1,
+            1,
+            facecolor="none",
+            edgecolor="white",
+            linewidth=1,
+            zorder=6,
+        )
+    )
 
 # imshow resets the axis limits, so apply the table limits afterwards
 ax.set_xlim(
@@ -1436,7 +1480,7 @@ x_axis_labels = (
     list(month_cols)
     + [
         "Total",
-        "SD",
+        "Std Dev",
     ]
 )
 
@@ -1455,7 +1499,7 @@ for column_position, column_label in enumerate(
             facecolor="#F2F2F2",
             edgecolor="none",
             linewidth=0,
-            zorder=9,
+            zorder=10,
             clip_on=False,
         )
     )
@@ -1507,7 +1551,7 @@ for row_position, row_label in enumerate(
 
     if row_label in BENCHMARK_NAMES:
 
-        y_axis_label_fill = "#a9d6e5"
+        y_axis_label_fill = "#a8dadc"
 
     else:
 
@@ -1531,7 +1575,7 @@ for row_position, row_label in enumerate(
 
     ax.text(
         -y_axis_label_column_width
-        + label_text_offset,
+        + 0.15,
         row_position + 0.5,
         row_label,
         ha="left",
@@ -1565,7 +1609,7 @@ ax.add_patch(
 
 ax.text(
     -y_axis_label_column_width
-    + label_text_offset,
+    + 0.15,
     -0.5,
     "Economies",
     ha="left",
@@ -1581,15 +1625,15 @@ ax.text(
 # BORDERS AND ROW GUIDES
 # =====================================================================
 
-# Bottom border of the header row
+# Bottom border of the label column
 ax.plot(
     [
         -y_axis_label_column_width,
-        total_number_of_columns,
+        0,
     ],
     [
-        0,
-        0,
+        number_of_rows,
+        number_of_rows,
     ],
     color="#1b263b",
     linewidth=2.5,
@@ -1598,6 +1642,16 @@ ax.plot(
 )
 
 # Vertical border between the label column and the data columns
+ax.axvline(
+    0,
+    ymin=0,
+    ymax=1,
+    color="#1b263b",
+    linewidth=2.5,
+    zorder=14,
+    clip_on=False,
+)
+
 ax.plot(
     [
         0,
@@ -1605,7 +1659,7 @@ ax.plot(
     ],
     [
         -1,
-        number_of_rows,
+        0,
     ],
     color="#1b263b",
     linewidth=2.5,
@@ -1614,6 +1668,20 @@ ax.plot(
 )
 
 # Total column borders
+ax.axvline(
+    total_idx,
+    color="#1b263b",
+    linewidth=2.5,
+    zorder=8,
+)
+
+ax.axvline(
+    sd_column_index,
+    color="#1b263b",
+    linewidth=2.5,
+    zorder=8,
+)
+
 ax.plot(
     [
         total_idx,
@@ -1621,7 +1689,7 @@ ax.plot(
     ],
     [
         -1,
-        number_of_rows,
+        0,
     ],
     color="#1b263b",
     linewidth=2.5,
@@ -1636,7 +1704,7 @@ ax.plot(
     ],
     [
         -1,
-        number_of_rows,
+        0,
     ],
     color="#1b263b",
     linewidth=2.5,
@@ -1784,7 +1852,7 @@ subtitle_second_line_y_position = SUBTITLE_Y - SUBTITLE_LINE_SPACING
 
 subtitle_font_size = 18.0
 
-subtitle_color = "#696969"
+subtitle_color = "#666666"
 
 subtitle_lines = wrap_text_to_figure_width(
     subtitle,
@@ -1852,21 +1920,13 @@ fig.text(
 # =====================================================================
 
 data_note = (
-    "Notes: Returns are MSCI Net Total Return indices in USD. "
-    "Total represents the cumulative return over the period shown. "
-    "SD is calculated as the standard deviation of daily returns "
-    "& annualized using the 252 trading day convention. "
-    "The latest month's return is a partial, month-to-date figure."
+    "Notes: Returns are calculated from MSCI Net Total Return index "
+    "levels in USD, incorporating reinvested dividends after "
+    "applicable withholding-tax assumptions. The latest month may be "
+    "incomplete and observation dates may vary by market. Annualized "
+    "volatility is calculated from daily NETR index-level returns "
+    "using a 252-trading-day convention."
 )
-
-if INCLUDE_CURRENT_MONTH and (
-    YEAR is None
-    or YEAR == today.year
-):
-
-    data_note += (
-        " The latest month is a partial, month-to-date figure."
-    )
 
 data_note_font_size = 16
 
@@ -1877,6 +1937,8 @@ data_note_alpha = 1
 data_note_first_line_y_position = NOTE_Y
 
 data_note_second_line_y_position = NOTE_Y - NOTE_LINE_SPACING
+
+fig.canvas.draw()
 
 data_note_lines = wrap_text_to_figure_width(
     data_note,
