@@ -205,7 +205,7 @@ download_start_date = (
 download_end_date = today
 
 chart_title = (
-    "Global Equity Market Returns Across Time Horizons"
+    "Global Equity Market Multi-Period Returns"
 )
 
 # =====================================================================
