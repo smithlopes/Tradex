@@ -34,11 +34,11 @@ except ImportError as error:
 
 # Manual chart positioning controls
 TITLE_Y = 0.955
-SUBTITLE_Y = 0.91
+SUBTITLE_Y = 0.915
 SUBTITLE_LINE_SPACING = 0.020
-HEAT_MAP_Y = 0.11
-SOURCE_Y = 0.079
-NOTE_Y = 0.057
+HEAT_MAP_Y = 0.12
+SOURCE_Y = 0.081
+NOTE_Y = 0.060
 NOTE_LINE_SPACING = 0.016
 
 # Horizons shown in the heatmap (label -> look-back offset).
@@ -1074,7 +1074,7 @@ fig.text(
     chart_title,
     ha="left",
     va="top",
-    fontsize=38,
+    fontsize=36,
     fontweight="bold",
 )
 
@@ -1145,7 +1145,7 @@ def wrap_text_to_figure_width(
 
 subtitle_right_limit = 0.97
 
-subtitle_font_size = 20.0
+subtitle_font_size = 18.0
 
 subtitle_color = "#666666"
 
