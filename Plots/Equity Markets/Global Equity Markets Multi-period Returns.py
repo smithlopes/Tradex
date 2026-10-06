@@ -205,7 +205,7 @@ download_start_date = (
 download_end_date = today
 
 chart_title = (
-    "Global Equity Market Multi-Period Returns"
+    "Global Equity Markets Multi-Period Returns"
 )
 
 # =====================================================================
@@ -732,7 +732,7 @@ common_right_position = 0.97
 maximum_label_width_pixels = 0.0
 
 for label in [
-    "Markets",
+    "Economies",
     *heatmap_df.index,
 ]:
 
