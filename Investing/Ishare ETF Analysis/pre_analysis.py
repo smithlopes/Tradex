@@ -71,7 +71,6 @@ def analyse_fund(ticker: str, d: dict) -> dict:
 
     out = {
         "Fund": ticker,
-        "Name": d["name"],
         "Type": "ETC" if (d.get("asset_class") or "").lower() == "commodity" else "ETF",
         "Inception Date": incep.date(),
         "Total Return": total_ret,
