@@ -72,6 +72,7 @@ def analyse_fund(ticker: str, d: dict) -> dict:
     out = {
         "Fund": ticker,
         "Type": "ETC" if (d.get("asset_class") or "").lower() == "commodity" else "ETF",
+        "Years of Data": round(years, 2),
         "Inception Date": incep.date(),
         "Total Return": total_ret,
         "CAGR": cagr,
@@ -118,4 +119,8 @@ if __name__ == "__main__":
     print(show)             # one row per fund, one column per metric
 
     print("\nDaily NAV return correlation matrix:")
-    print(build_correlation_matrix(data).round(2))
+    corr = build_correlation_matrix(data)
+    corr_display = corr.map(lambda value: f"{value:.2f}" if pd.notna(value) else "")
+    for ticker in corr_display.index.intersection(corr_display.columns):
+        corr_display.loc[ticker, ticker] = ""
+    print(corr_display)
